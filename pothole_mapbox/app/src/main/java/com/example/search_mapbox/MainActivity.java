@@ -6,9 +6,12 @@ import static com.mapbox.maps.plugin.gestures.GesturesUtils.addOnMapClickListene
 import static com.mapbox.maps.plugin.gestures.GesturesUtils.getGestures;
 import static com.mapbox.maps.plugin.locationcomponent.LocationComponentUtils.getLocationComponent;
 import static com.mapbox.navigation.base.extensions.RouteOptionsExtensions.applyDefaultNavigationOptions;
+import com.mapbox.navigation.base.formatter.UnitType;
+
 
 import android.Manifest;
 import android.annotation.SuppressLint;
+import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -18,6 +21,7 @@ import android.os.Bundle;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.View;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultCallback;
@@ -26,6 +30,7 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
+import androidx.cardview.widget.CardView;
 
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
@@ -70,6 +75,7 @@ import com.mapbox.navigation.core.trip.session.LocationMatcherResult;
 import com.mapbox.navigation.core.trip.session.LocationObserver;
 import com.mapbox.navigation.core.trip.session.VoiceInstructionsObserver;
 import com.mapbox.navigation.ui.base.util.MapboxNavigationConsumer;
+import com.mapbox.navigation.ui.maneuver.model.PrimaryManeuver;
 import com.mapbox.navigation.ui.maps.location.NavigationLocationProvider;
 import com.mapbox.navigation.ui.maps.route.line.api.MapboxRouteLineApi;
 import com.mapbox.navigation.ui.maps.route.line.api.MapboxRouteLineView;
@@ -89,6 +95,14 @@ import com.mapbox.search.autocomplete.PlaceAutocompleteSuggestion;
 import com.mapbox.search.ui.adapter.autocomplete.PlaceAutocompleteUiAdapter;
 import com.mapbox.search.ui.view.CommonSearchViewConfiguration;
 import com.mapbox.search.ui.view.SearchResultsView;
+import com.mapbox.navigation.base.trip.model.RouteProgress;
+import com.mapbox.navigation.core.trip.session.RouteProgressObserver;
+import com.mapbox.navigation.ui.maneuver.api.MapboxManeuverApi;
+import com.mapbox.navigation.ui.maneuver.model.Maneuver;
+
+import com.mapbox.navigation.ui.maneuver.view.MapboxManeuverView;
+import com.mapbox.navigation.ui.maneuver.api.MapboxManeuverApi;
+import com.mapbox.navigation.ui.maneuver.model.ManeuverError;
 
 import java.util.Arrays;
 import java.util.List;
@@ -100,6 +114,10 @@ import kotlin.coroutines.Continuation;
 import kotlin.coroutines.CoroutineContext;
 import kotlin.coroutines.EmptyCoroutineContext;
 import kotlin.jvm.functions.Function1;
+
+import com.mapbox.navigation.base.formatter.DistanceFormatter;
+import com.mapbox.navigation.base.formatter.DistanceFormatterOptions;
+import com.mapbox.navigation.base.formatter.MapboxDistanceFormatter;
 
 public class MainActivity extends AppCompatActivity {
     MapView mapView;
@@ -218,6 +236,13 @@ public class MainActivity extends AppCompatActivity {
     private TextInputEditText searchET;
     private boolean ignoreNextQueryUpdate = false;
 
+    private CardView maneuverCardView;
+    private MapboxManeuverView maneuverView;
+    private TextView stepDistanceRemainingTextView;
+    private TextView stepInstructionTextView;
+
+    private MapboxManeuverApi maneuverApi;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -330,6 +355,25 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
+        maneuverApi = new MapboxManeuverApi(
+            new DistanceFormatter() {
+                @NonNull
+                @Override
+                public String formatDistance(double distanceInMeters) {
+                    if (distanceInMeters < 1000) {
+                        return String.format(Locale.getDefault(), "%d m", (int) distanceInMeters);
+                    } else {
+                        return String.format(Locale.getDefault(), "%.1f km", distanceInMeters / 1000);
+                    }
+                }
+
+                @Override
+                public com.mapbox.navigation.base.formatter.UnitType getUnitType() {
+                    return com.mapbox.navigation.base.formatter.UnitType.METRIC;
+                }
+            }
+        );
+
         mapView.getMapboxMap().loadStyleUri(Style.MAPBOX_STREETS, new Style.OnStyleLoaded() {
             @Override
             public void onStyleLoaded(@NonNull Style style) {
@@ -411,6 +455,42 @@ public class MainActivity extends AppCompatActivity {
 
                     }
                 });
+
+                maneuverCardView = findViewById(R.id.maneuverCardView);
+                maneuverView = findViewById(R.id.maneuverView);
+                stepDistanceRemainingTextView = findViewById(R.id.stepDistanceRemainingTextView);
+                stepInstructionTextView = findViewById(R.id.stepInstructionTextView);
+
+                mapboxNavigation.registerRouteProgressObserver(new RouteProgressObserver() {
+                    @Override
+                    public void onRouteProgressChanged(@NonNull RouteProgress routeProgress) {
+                        maneuverCardView.setVisibility(View.VISIBLE);
+
+                        Expected<ManeuverError, List<Maneuver>> maneuvers = maneuverApi.getManeuvers(routeProgress);
+                        maneuvers.fold(
+                                error -> Unit.INSTANCE,
+                                maneuverList -> {
+                                    if (!maneuverList.isEmpty()) {
+                                        Maneuver maneuver = maneuverList.get(0);
+                                        PrimaryManeuver primary = maneuver.getPrimary();
+
+                                        double distanceRemaining = routeProgress.getCurrentLegProgress().getCurrentStepProgress().getDistanceRemaining();
+                                        String formattedDistance = formatDistance(distanceRemaining);
+                                        stepDistanceRemainingTextView.setText(formattedDistance);
+
+                                        if (primary != null) {
+                                            String instruction = primary.getText();
+                                            if (instruction != null) {
+                                                stepInstructionTextView.setText(instruction);
+                                                maneuverView.renderManeuvers(maneuvers);
+                                            }
+                                        }
+                                    }
+                                    return Unit.INSTANCE;
+                                }
+                        );
+                    }
+                });
             }
         });
     }
@@ -469,4 +549,13 @@ public class MainActivity extends AppCompatActivity {
         mapboxNavigation.unregisterRoutesObserver(routesObserver);
         mapboxNavigation.unregisterLocationObserver(locationObserver);
     }
+
+    private String formatDistance(double distanceInMeters) {
+        if (distanceInMeters < 1000) {
+            return String.format(Locale.getDefault(), "%d m", (int) distanceInMeters);
+        } else {
+            return String.format(Locale.getDefault(), "%.1f km", distanceInMeters / 1000);
+        }
+    }
+
 }
